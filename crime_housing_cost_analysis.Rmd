@@ -1,0 +1,254 @@
+---
+title: "Evaluating How Crime Rate Impacts Rental Housing Price"
+author: "Brian Tung, Kevin Cahillane, Meng-Kang Kao, Nic Brathwaite"
+date: "7/31/2022"
+output: pdf_document
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r loading libraries, include=FALSE}
+library(tidyverse)
+library(patchwork)
+library(stargazer)
+library(sandwich)
+library(lmtest)
+library(magrittr)
+library(ggplot2)
+library(car)
+```
+```{r include=FALSE}
+#Read rent data
+rent <- read.csv('rent.csv')
+#caArea <- read.csv('caarea.csv')
+caArea2 <- read.csv('caarea2.csv')
+#Load FBI crime 2012 data for final version
+fbi_2012 <- read.csv('fbiCrime.csv')
+#Load FBI crime 2011 data for EDA purpose
+fbi_2011 <- read.csv('fbiCrime_2011.csv')
+fbi_2012_full <- read.csv('fbiCrime_2012_full.csv')
+```
+
+# Introduction
+
+Home ownership has always been a core component in the American Dream as a milestone of prosperity, with many Americans viewing it with priority over aspects such as career, family, and college. In the effort to build wealth, some Americans seek investment opportunities in building a portfolio of rental properties. In a wealth-concentrated location like the Bay Area, second-home sales jumped 54% in 2021 from pre-pandemic levels\footnote{Hansen, Louis. "Record second-home purchases fueled by Bay Area wealth." Mercury News (2021) https://www.mercurynews.com/2021/11/28/record-second-home-purchases-fueled-by-bay-area-wealth/}.
+
+However, today’s competitive housing market and astronomical prices force buyers to make compromises in purchasing decisions, such as neighborhood safety. Experts have found that properties in high crime areas may be subject to frequent property damage, low-quality renters, and lower property values\footnote{Reeder Asset Management, "Why Rental Property Owners Must Evaluate Crime Rates for ROI" (2021) https://www.reederproperties.com/blog/why-rental-property-owners-must-evaluate-crime-rates-for-roi }. For home buyers with a tight budget, uncertainty in navigating real estate opportunities may likely lead to a poor investment decision.
+
+The core objective of this study is to leverage rental listing data in the Bay Area along with city safety information in hopes to provide guidance for home buyers to make the best purchasing decision and maximize ROI. We use regression models to estimate the relationship between the rental price of a property and city crime rates with additional impacts of environmental and property features.
+
+# Data and Methodology
+
+The data used in our study consists of datasets from three separate sources. The first dataset is part of “San Francisco Rentals” dataset on TidyTuesday, which was web-scraped from Bay Area Craigslist rental listings using the internet archive repository, Wayback Machine. This dataset contains detailed property information on city, county, rental price, number of bedrooms, number of bathrooms, and square footage. The second dataset is a violent crimes report from the FBI’s Uniform Crime Reporting agency\footnote{FBI, "Crime in the United States 2012" (2012), https://ucr.fbi.gov/crime-in-the-u.s/2012/crime-in-the-u.s.-2012/violent-crime}, which includes categorical crime rates and population data by city. The violent crimes dataset was collected via the Hierarchy Rule, which only counts the most serious offense in a multiple-offense criminal incident. The third dataset is the city area in square miles from Wikipedia\footnote{Wikipedia, "List of cities and towns in the San Francisco Bay Area", \\https://en.wikipedia.org/wiki/List\_of\_cities\_and\_towns\_in\_the\_San\_Francisco\_Bay\_Area} . We then derive two more fields of population density(in k), which is based on city population data from FBI crime dataset divided by square miles, and crime per 1000, which is the crime count divided by population times 1000. All of the datasets used in this study are observational.
+
+Figure 1 shows the plot of crime per 1000 over rental price. To avoid potential time series bias, we decide to limit our study to rental posts from 2012 and use 2011 rental posts as our test dataset for EDA. We also drop Emeryville from the dataset due to its extreme crime ratio outlier. Emeryville is commonly ranked as one of the most crime-ridden cities in the US\footnote{CrimeGrade.org, "The Safest and Most Dangerous Places in Emeryville, CA: Crime Maps and Statistics", https://crimegrade.org/safest-places-in-emeryville-ca/}.
+
+```{r eval=FALSE, include=FALSE}
+#summary(rent)
+#200796 total rows
+rent %>%
+  group_by(year) %>%
+  summarize(
+    count = n()
+  ) %>%
+  arrange(desc(count))
+```
+```{r EDA with 2011 rent data, include=FALSE}
+rent_2011 <- rent %>%
+  filter(
+    year == 2011,
+  )
+# Year 2011 has 21230 rows
+
+sum(!is.na(rent_2011$price)) #21230 rows has price information, 0 rows does not.
+sum(!is.na(rent_2011$beds)) #20562 rows has number of bedrooms information, 668 rows does not.
+sum(!is.na(rent_2011$baths)) #3953 rows has number of bathrooms information, 17277 rows does not
+sum(!is.na(rent_2011$sqft)) #8780 rows has number of sqft information, 12450 rows does not
+
+rent_2011_clean <- rent %>%
+  filter(
+    year == 2011,
+    !is.na(price),
+    !is.na(beds),
+    !is.na(baths),
+    !is.na(sqft)
+  )
+# After removing records with empty price, beds, baths, sqft, we have 1802 rows
+```
+```{r calculating population density and crime rate with FBI 2011 data, include=FALSE}
+rent_supp_2011 <- left_join(x=caArea2, fbi_2011, by = 'city')
+
+rent_supp_2011 <- rent_supp_2011 %>%
+  mutate(
+    population_density_1000 = as.numeric(Population) / as.numeric(sq.mi) / 1000,
+    crime_per_1000 = as.numeric(Violent.crime) / as.numeric(Population) * 1000
+  )
+
+rent_2011_clean_2 <- left_join(x=rent_2011_clean, rent_supp_2011, by = 'city')
+
+sum(!is.na(rent_2011_clean_2$population_density_1000))
+sum(is.na(rent_2011_clean_2$population_density_1000))
+#1649 rows has population density and crime rate information, 153 rows does not
+
+rent_2011_clean_2 <- rent_2011_clean_2 %>%
+  filter(
+    !is.na(population_density_1000),
+    !is.na(crime_per_1000)
+  )
+```
+
+```{r figure_1, echo=FALSE, fig.cap="Emeryville has unproportionally high crime rate", fig.height=3, message=FALSE, warning=FALSE}
+rent_2011_clean_2 %>%
+  ggplot(aes(crime_per_1000, price)) + 
+  geom_point() +
+  geom_smooth() +
+  labs(
+    x = 'Crime per 1000 Population by City',
+    y = 'Rental Cost ($)'
+  ) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("City Crime Rate vs. Rental Cost")
+```
+
+```{r figure_2, echo=FALSE, fig.height=3, message=FALSE, fig.cap = "No severe skew to cause no unique BLP", warning=FALSE}
+rent_2011_crime_less_than_10 <- rent_2011_clean_2 %>%
+  filter(
+    crime_per_1000 < 10
+  )
+
+eda_mod <- lm(price ~ beds + baths + population_density_1000 + crime_per_1000, data = rent_2011_crime_less_than_10)
+
+rent_2011_crime_less_than_10 %>%
+  mutate(
+    fit = predict(eda_mod)
+  ) %>%
+  ggplot(aes(x=fit)) + 
+  geom_histogram() +
+  labs(
+    x = "Predicted variable",
+    y = "Count"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Histogram on model variable")
+```
+
+```{r 2012 data, include=FALSE}
+#year 2012 has 35206 rows
+rent_2012 <- rent %>%
+  filter(
+    year == 2012,
+  )
+
+rent_2012_clean <- rent %>%
+  filter(
+    year == 2012,
+    !is.na(price),
+    !is.na(beds),
+    !is.na(baths),
+    !is.na(sqft)
+  )
+
+rent_supp_2012 <- left_join(x=caArea2, fbi_2012_full, by = 'city')
+
+rent_supp_2012 <- rent_supp_2012 %>%
+  filter(
+    !is.na(Population),
+    !is.na(Violent.crime)
+  )  %>%
+  mutate(
+    population = as.numeric(gsub(",","",Population)),
+    population_density_1000 = population / as.numeric(sq.mi) / 1000,
+    crime_per_1000 = as.numeric(gsub(",", "", Violent.crime)) / population * 1000
+  )
+
+rent_2012_clean_2 <- left_join(x=rent_2012_clean, rent_supp_2012, by = 'city')
+
+rent_2012_crime_less_than_10 <- rent_2012_clean_2 %>%
+  filter(
+    crime_per_1000 < 10
+  )
+```
+
+```{r linear model, include=FALSE}
+mod1 <- lm(price ~ beds + baths + sqft + crime_per_1000, data = rent_2012_crime_less_than_10)
+se1 <- mod1 %>% vcovHC(type = "HC1") %>% diag() %>% sqrt()
+
+mod2 <- lm(price ~ beds + baths + sqft + population_density_1000 + crime_per_1000, data = rent_2012_crime_less_than_10)
+se2 <- mod2 %>% vcovHC(type = "HC1") %>% diag() %>% sqrt()
+
+mod3 <- lm(price ~ beds + baths + population_density_1000 + crime_per_1000, data = rent_2012_crime_less_than_10)
+se3 <- mod3 %>% vcovHC(type = "HC1") %>% diag() %>% sqrt()
+
+coeftest(mod1, vcov=vcovHC(mod1))
+vif(mod1)
+
+coeftest(mod2, vcov=vcovHC(mod2))
+vif(mod2)
+
+coeftest(mod3, vcov=vcovHC(mod3))
+vif(mod3)
+```
+```{r eval=FALSE, include=FALSE}
+rent_2012_crime_less_than_10 %>%
+  ggplot(aes(crime_per_1000, predict(mod3))) + 
+  geom_point() + 
+  geom_smooth() +
+  labs(
+    title = 'Some title',
+    x = 'Crime per 1000 Population by City',
+    y = 'Predicted rental house price'
+  )
+```
+
+Figure 2 shows the predicted value histogram to visually scan for heavy tails. The plot is approximately normal despite a slight right skew, which is not indicative of infinite variance. Additionally, we prove no perfect collinearity through R’s functionality of dropping variables. Since no variables were dropped in R, there is no perfect collinearity.
+
+We operationalize rent cost at the household-level, using the posted price of Craigslist advertisements. These were pulled using the Wayback Machine which archived Craigslist on random days. As a result, if there were any changes in the listed price over the course of the year, our rent variable shows a randomly selected price from the life of the posting. To estimate the effect that crime rate has on rental prices in the Bay Area, we develop a linear regression model with the crime-to-population ratio (crime_ratio) as our primary causal variable and the rent price (price) as our dependent variable. After running a regression on this model, we decide to control for the potentially confounding variable of urbanness. We believe that omission of this variable causes the crime ratio coefficient to have a highly positive bias. We approximate urbanness using the population density of each city (pop_density).We also choose to control for other aspects of the household (house_dimensions) that commonly affect rent prices such as the number of bedrooms, bathrooms, and total square footage. Finally, we remove square footage from the house dimensions variables since it is highly correlated with the number of bedrooms. 
+
+Below is the third and final model. The results from all models can be found in the Results section.
+$$
+\widehat{Price} = \beta_0 + \beta_1Number\ of\ Bedrooms + \beta_2Number\ of\ Bathrooms + \beta_3Population\ density + \beta_4Crime\ rate
+$$
+
+# Results
+
+Table 1 below shows the three most appropriate models. All models show evidence that the crime rate per 1000 people has a statistically significant effect on rent. Model 3 in Table 1 below shows that crime rate has a negative coefficient of -128.98. In other words, an increase of 1 crime per 1000 people per year would lower the monthly rent costs by approximately $130. Given the crime rate in the Bay Area is between 0 and 6 per 1000 people, this coefficient shows practical significance.
+
+Model 3 removes square footage from the linear model and produces statistically significant coefficients for number of bedrooms (245.37), number of bathrooms (689.61), and the population density (137.28). Meaning, for every bedroom in an apartment the price of rent increases by approximately \$245, every additional bathroom increases rent by approximately \$690, and for every 1000 additional people per square mile rent increases by an estimate of $137.
+
+By comparing Model 2 and Model 3 with Anova, we see Model 3 has a highly statistically significant P-value. Thus, we conclude that Model 3 is a better representative of the true rental housing price by adding population density variable to the linear model.
+
+```{r display regression table, message=FALSE, echo=FALSE, results='asis'}
+?stargazer
+stargazer(mod1, mod2, mod3, type = 'latex', 
+          se = list(se1,se2,se3),
+          header=FALSE,
+          title = "Estimated Regressions",
+          dep.var.caption  = "Output Variable: Rental Cost",
+          dep.var.labels   = "",
+          dep.var.labels.include = FALSE,
+          no.space = TRUE,
+          star.cutoffs = c(0.05, 0.01, 0.001) ,
+          covariate.labels = c("Number of bedrooms", "Number of bathrooms", "Square feet", "Population(K) per Sq.Mi", "Crime per 1000 population", "Constant"),
+          omit.stat=c("rsq","f"), digits=2
+)
+```
+```{r include=FALSE}
+anova(mod1, mod2)
+anova(mod2, mod3)
+```
+
+# Limitations
+
+We do not believe that our dataset is IID, since Craigslist data is not able to capture the entire rental market. As highlighted by the author of the dataset, there is reason to expect that the dataset fails to capture the highest end of the market, where housing transactions are primarily managed by real estate agencies\footnote{Pennington Kate, "Craigslist Scrape Methodology" (2018), https://www.katepennington.org/clmethod }.
+
+Regression models on large samples also require the existence and uniqueness of a best linear predictor. During our EDA visualization phase, we did not find evidence of a heavy-tail distribution. There is also no evidence of perfect collinearity, as no variables were automatically dropped.
+
+Omitted variables that could introduce structural biases include average income, and Bay Area demographics due to their potential correlation with both rent price and crime rate. We expect income to have a negative effect on crime rate. Thus, we expect the omitted variable bias to push the negative coefficient of crime towards zero. 
+
+# Conclusion
+
+This study estimates the impact of city level crime rates on rental prices in the Bay Area and supports our beliefs that crime rates have a significant role in influencing rental listing price, reducing rental prices with each crime event in 1000 people. During our model exploration phase, we found that omitting population density from the model resulted in a positive crime coefficient, and was corrected upon implementation. We also explore additional predictors including number of bedrooms, number of bathrooms, and city population density, which were all found to have a positive coefficient and a statistically significant impact on rental price.
+
+We encourage future research to explore which crime has the most impact on rent price. Additionally, we did not include average income in our model due to lack of reliable data sources, but future studies should also consider exploring this direction to provide a different perspective. Our goal for this area of research is to provide potential investment property owners a better understanding of the relationship between rental price and crime rate.
